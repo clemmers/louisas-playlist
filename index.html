@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CD Player</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: transparent;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+
+  #bg-canvas {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    image-rendering: pixelated;
+  }
+
+  .stage {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .stage img, #bumper img, #layer-crt {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    pointer-events: none;
+  }
+
+  #layer-legs { z-index: 1; position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; pointer-events: none; }
+
+  #bumper {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;
+  }
+
+  #layer-body    { z-index: 1; }
+  #layer-lights  { z-index: 2; opacity: 0; }
+  #layer-screen  { z-index: 3; opacity: 0; }
+  #layer-screen-black {
+    z-index: 4;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    opacity: 0;
+    /* Same mask as CRT — only covers the screen area */
+    -webkit-mask-image: url('cd_player/screen.png');
+    mask-image: url('cd_player/screen.png');
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    background: black;
+  }
+  #layer-screen-black.on { opacity: 1; }
+  #layer-album   { z-index: 5; opacity: 0; }
+  #layer-crt     { z-index: 6; opacity: 0; pointer-events: none; }
+  #layer-rewind  { z-index: 7; }
+  #layer-skip    { z-index: 8; }
+
+  #layer-lights.on { animation: monitor-on 1.2s ease-out forwards; }
+  #layer-screen.on { animation: monitor-on 1.4s ease-out forwards; }
+  #layer-album.on  { opacity: 1; }
+
+  @keyframes monitor-on {
+    0%   { opacity: 0;   filter: brightness(4) saturate(0); }
+    15%  { opacity: 1;   filter: brightness(3) saturate(0.2); }
+    40%  { opacity: 0.7; filter: brightness(1.5) saturate(0.6); }
+    70%  { opacity: 1;   filter: brightness(1.2) saturate(0.9); }
+    100% { opacity: 1;   filter: brightness(1)   saturate(1); }
+  }
+
+  #layer-lights.off, #layer-screen.off {
+    animation: none; opacity: 0; filter: none;
+  }
+
+  #layer-crt {
+    -webkit-mask-image: url('cd_player/screen.png');
+    mask-image: url('cd_player/screen.png');
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,0.22) 2px, rgba(0,0,0,0.22) 4px
+    );
+    box-shadow: inset 0 0 40px rgba(0,0,0,0.5);
+    transition: opacity 0.6s ease;
+  }
+  #layer-crt.on { opacity: 1; }
+
+  #cd {
+    position: fixed;
+    image-rendering: pixelated;
+    cursor: grab;
+    z-index: 20;
+  }
+  #cd.dragging { cursor: grabbing; }
+  #cd.hidden   { display: none; }
+</style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+
+<div class="stage" id="stage">
+  <img id="layer-legs" src="cd_player/legs.png" alt="" draggable="false">
+  <div id="bumper">
+    <img id="layer-body"   src="cd_player/body.png"   alt="" draggable="false">
+    <img id="layer-lights" src="cd_player/lights.png" alt="" draggable="false">
+    <img id="layer-screen" src="cd_player/screen.png" alt="" draggable="false">
+    <div id="layer-screen-black"></div>
+    <img id="layer-album"  src=""                     alt="" draggable="false">
+    <div id="layer-crt"></div>
+    <img id="layer-rewind" src="cd_player/rewind.png" alt="" draggable="false">
+    <img id="layer-skip"   src="cd_player/skip.png"   alt="" draggable="false">
+  </div>
+</div>
+
+<img id="cd" src="cd.png" alt="" draggable="false">
+
+<script>
+// ============================================================
+//  TUNEABLE SETTINGS
+// ============================================================
+
+const STAGE_PADDING     = 80;    // px kept free around player (for CD above + breathing room)
+const CD_GAP            = 20;    // px gap between CD and top of player
+const LIGHT_ON_DELAY    = 600;   // ms after insert before lights turn on
+const MUSIC_START_DELAY = 1800;  // ms after lights on before music begins
+const TOTAL_SONGS       = 26;
+const DRAG_THRESHOLD    = 6;     // px pointer must move before counted as a drag
+
+// -- Bump physics --
+const BUMP_KICK         = -30;   // px upward displacement at full bass energy (negative = up)
+const BUMP_SPRING       = 0.50;  // spring stiffness pulling back to rest
+const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = bouncier)
+
+// ============================================================
+//  END OF SETTINGS
+// ============================================================
+
+  // ── Dither background ────────────────────────────────────────
+  const BAYER8 = [
+     0,32, 8,40, 2,34,10,42,
+    48,16,56,24,50,18,58,26,
+    12,44, 4,36,14,46, 6,38,
+    60,28,52,20,62,30,54,22,
+     3,35,11,43, 1,33, 9,41,
+    51,19,59,27,49,17,57,25,
+    15,47, 7,39,13,45, 5,37,
+    63,31,55,23,61,29,53,21
+  ];
+  const DITHER_A = [255,255,255];
+  const DITHER_B = [255,182,193];
+
+  function drawDitherBG() {
+    const canvas = document.getElementById('bg-canvas');
+    const W = window.innerWidth, H = window.innerHeight;
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(W, H);
+    const d   = img.data;
+    for (let y = 0; y < H; y++) {
+      const t = y / (H - 1);
+      for (let x = 0; x < W; x++) {
+        const th = BAYER8[(y%8)*8+(x%8)] / 64;
+        const c  = t > th ? DITHER_B : DITHER_A;
+        const i  = (y*W+x)*4;
+        d[i]=c[0]; d[i+1]=c[1]; d[i+2]=c[2]; d[i+3]=255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  drawDitherBG();
+  window.addEventListener('resize', () => { drawDitherBG(); resizeLayout(); });
+
+  // ── Element refs ─────────────────────────────────────────────
+  const cd          = document.getElementById('cd');
+  const stage       = document.getElementById('stage');
+  const bumper      = document.getElementById('bumper');
+  const layerBody   = document.getElementById('layer-body');
+  const layerLights = document.getElementById('layer-lights');
+  const layerScreen = document.getElementById('layer-screen');
+  const layerAlbum  = document.getElementById('layer-album');
+  const layerScreenBlack = document.getElementById('layer-screen-black');
+  const layerCRT    = document.getElementById('layer-crt');
+  const layerRewind = document.getElementById('layer-rewind');
+  const layerSkip   = document.getElementById('layer-skip');
+
+  // ── Responsive sizing ─────────────────────────────────────────
+  // Player fills the screen with padding reserved for the CD above it.
+  // CD is half the player size, sits centered above with CD_GAP spacing.
+  // Total vertical space needed: cdSize + CD_GAP + stageSize
+  // We solve: stageSize + stageSize/2 + CD_GAP + STAGE_PADDING = min(W, H)
+
+  let stageSize = 360; // computed in resizeLayout
+  let cdSize    = 180;
+  let homeLeft  = '0px';
+  let homeTop   = '0px';
+
+  function resizeLayout() {
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    // Available height: H minus padding
+    // stageSize * 1.5 + CD_GAP = available → stageSize = (available - CD_GAP) / 1.5
+    const availH = H - STAGE_PADDING;
+    const availW = W - STAGE_PADDING;
+    stageSize = Math.floor(Math.min(availW, (availH - CD_GAP) / 1.5));
+    stageSize = Math.max(stageSize, 120); // minimum sensible size
+    cdSize    = Math.floor(stageSize / 2);
+
+    stage.style.width  = stageSize + 'px';
+    stage.style.height = stageSize + 'px';
+
+    // Position CD: centered above player, fixed to screen coords
+    // We need the stage's screen position — use getBoundingClientRect after layout
+    // Use rAF to ensure layout has settled
+    requestAnimationFrame(snapCDToHome);
+  }
+
+  // Transparent-top fraction of body.png — measured once, never from body_open
+  let bodyTransparentTopFraction = 0;
+  let bodyTopMeasured = false;
+
+  function measureBodyTop() {
+    if (bodyTopMeasured) return;
+    // Find the cache entry for body.png — key is whatever the browser resolved as img.src
+    const data = hitCache.get(layerBody.src);
+    if (!data) return;
+    for (let y = 0; y < data.height; y++) {
+      for (let x = 0; x < data.width; x++) {
+        if (data.data[(y * data.width + x) * 4 + 3] > 10) {
+          bodyTransparentTopFraction = y / data.height;
+          bodyTopMeasured = true;
+          return;
+        }
+      }
+    }
+    bodyTopMeasured = true; // all transparent — fraction stays 0
+  }
+
+  function snapCDToHome() {
+    measureBodyTop();
+    const r = stage.getBoundingClientRect();
+    const transparentTopPx = bodyTransparentTopFraction * stageSize;
+    homeLeft = (r.left + (stageSize - cdSize) / 2) + 'px';
+    homeTop  = (r.top + transparentTopPx - cdSize - CD_GAP) + 'px';
+
+    // Only physically move the CD if it's currently at home (not dropped elsewhere)
+    if (!inserted && (cd.style.left === '' || cd.style.left === homeLeft)) {
+      cd.style.width  = cdSize + 'px';
+      cd.style.height = cdSize + 'px';
+      cd.style.left   = homeLeft;
+      cd.style.top    = homeTop;
+    }
+  }
+
+  resizeLayout();
+
+  // ── Audio ─────────────────────────────────────────────────────
+  const clickIn  = new Audio('click.mp3');
+  const clickOut = new Audio('click_out.mp3');
+  const btnPress = new Audio('cd_player/button_press.mp3');
+  const btnLift  = new Audio('cd_player/button_lift.mp3');
+
+  let currentSong = 1;
+  const music = new Audio();
+  music.addEventListener('ended', nextSong);
+
+  function loadSong(n) {
+    currentSong = n;
+    music.src = `./playlist/${n}.mp3`;
+    if (inserted) layerAlbum.src = `./playlist/${n}.png`;
+  }
+  function nextSong() { loadSong((currentSong % TOTAL_SONGS) + 1); music.play().catch(()=>{}); }
+  function prevSong() {
+    if (music.currentTime > 3) { music.currentTime = 0; }
+    else { loadSong(currentSong === 1 ? TOTAL_SONGS : currentSong - 1); music.play().catch(()=>{}); }
+  }
+
+  // ── Hit testing ───────────────────────────────────────────────
+  const hitCache = new Map();
+
+  function buildCache(imgEl) {
+    if (!imgEl.complete || imgEl.naturalWidth === 0) return;
+    const src = imgEl.src;
+    if (hitCache.has(src)) return;
+    const c = document.createElement('canvas');
+    c.width = imgEl.naturalWidth; c.height = imgEl.naturalHeight;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(imgEl, 0, 0);
+    try { hitCache.set(src, ctx.getImageData(0,0,c.width,c.height)); } catch(e){}
+  }
+
+  function isOpaqueAt(imgEl, cx, cy) {
+    buildCache(imgEl);
+    const data = hitCache.get(imgEl.src);
+    if (!data) return false;
+    const r  = imgEl.getBoundingClientRect();
+    const nx = (cx - r.left) / r.width;
+    const ny = (cy - r.top)  / r.height;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return false;
+    const px = Math.floor(nx * data.width);
+    const py = Math.floor(ny * data.height);
+    return data.data[(py * data.width + px) * 4 + 3] > 10;
+  }
+
+  // ── State ─────────────────────────────────────────────────────
+  let inserted       = false;
+  let everPlayed     = false;
+  let wasDragged     = false;
+  let justInserted   = false;
+  let dragStartX, dragStartY;
+  let grabOffX, grabOffY;
+
+  [layerRewind, layerSkip, layerBody].forEach(el => {
+    if (el.complete) { buildCache(el); if (el === layerBody) { measureBodyTop(); snapCDToHome(); } }
+    else el.addEventListener('load', () => { buildCache(el); if (el === layerBody) { measureBodyTop(); snapCDToHome(); } });
+  });
+
+  // ── Helpers ───────────────────────────────────────────────────
+  function getStageRect() { return stage.getBoundingClientRect(); }
+  function showOpenBody() {
+    layerBody.src = 'cd_player/body_open.png';
+    layerBody.addEventListener('load', () => { hitCache.delete(layerBody.src); buildCache(layerBody); }, { once: true });
+  }
+  function showClosedBody() {
+    layerBody.src = 'cd_player/body.png';
+    layerBody.addEventListener('load', () => { hitCache.delete(layerBody.src); buildCache(layerBody); }, { once: true });
+  }
+
+  // ── Cursor constants ──────────────────────────────────────────
+  const CURSOR_PAUSE   = `url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2232%22%20height%3D%2232%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20x%3D%228%22%20y%3D%226%22%20width%3D%225%22%20height%3D%2220%22%20rx%3D%222%22%20fill%3D%22white%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%2F%3E%3Crect%20x%3D%2219%22%20y%3D%226%22%20width%3D%225%22%20height%3D%2220%22%20rx%3D%222%22%20fill%3D%22white%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%2F%3E%3C%2Fsvg%3E") 16 16, pointer`;
+  const CURSOR_PLAY    = `url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2232%22%20height%3D%2232%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpolygon%20points%3D%228%2C4%2028%2C16%208%2C28%22%20fill%3D%22white%22%20stroke%3D%22black%22%20stroke-width%3D%222%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E") 16 16, pointer`;
+  const CURSOR_POINTER = 'pointer';
+  const CURSOR_DEFAULT = 'default';
+
+  let lastMouseX = -1, lastMouseY = -1, mouseOnStage = false;
+
+  function updateStageCursor() {
+    if (!mouseOnStage) return;
+    const cx = lastMouseX, cy = lastMouseY;
+    if (isOpaqueAt(layerRewind, cx, cy) || isOpaqueAt(layerSkip, cx, cy)) {
+      stage.style.cursor = CURSOR_POINTER;
+    } else if (inserted && isOpaqueAt(layerBody, cx, cy)) {
+      stage.style.cursor = music.paused ? CURSOR_PLAY : CURSOR_PAUSE;
+    } else {
+      stage.style.cursor = CURSOR_DEFAULT;
+    }
+  }
+
+  stage.addEventListener('mousemove', (e) => {
+    lastMouseX = e.clientX; lastMouseY = e.clientY; mouseOnStage = true;
+    updateStageCursor();
+  });
+  stage.addEventListener('mouseenter', (e) => {
+    lastMouseX = e.clientX; lastMouseY = e.clientY; mouseOnStage = true;
+    updateStageCursor();
+  });
+  stage.addEventListener('mouseleave', () => {
+    mouseOnStage = false;
+    stage.style.cursor = CURSOR_DEFAULT;
+  });
+
+  // Update cursor immediately whenever music state changes
+  music.addEventListener('play',  updateStageCursor);
+  music.addEventListener('pause', updateStageCursor);
+
+  // ── Drag free CD ──────────────────────────────────────────────
+  cd.addEventListener('mousedown',  startDragCD);
+  cd.addEventListener('touchstart', startDragCD, { passive: false });
+
+  function startDragCD(e) {
+    if (inserted) return;
+    e.preventDefault();
+    wasDragged = false;
+    const touch = e.touches ? e.touches[0] : e;
+    const rect  = cd.getBoundingClientRect();
+    grabOffX   = touch.clientX - rect.left;
+    grabOffY   = touch.clientY - rect.top;
+    dragStartX = touch.clientX;
+    dragStartY = touch.clientY;
+    cd.classList.add('dragging');
+    showOpenBody();
+    document.addEventListener('mousemove', onDragCD);
+    document.addEventListener('mouseup',   onDropCD);
+    document.addEventListener('touchmove', onDragCD, { passive: false });
+    document.addEventListener('touchend',  onDropCD);
+  }
+
+  function onDragCD(e) {
+    e.preventDefault();
+    const touch = e.touches ? e.touches[0] : e;
+    const dx = touch.clientX - dragStartX;
+    const dy = touch.clientY - dragStartY;
+    if (!wasDragged && Math.hypot(dx, dy) > DRAG_THRESHOLD) wasDragged = true;
+    if (!wasDragged) return;
+    cd.style.left = (touch.clientX - grabOffX) + 'px';
+    cd.style.top  = (touch.clientY - grabOffY) + 'px';
+  }
+
+  function onDropCD(e) {
+    cd.classList.remove('dragging');
+    showClosedBody();
+    document.removeEventListener('mousemove', onDragCD);
+    document.removeEventListener('mouseup',   onDropCD);
+    document.removeEventListener('touchmove', onDragCD);
+    document.removeEventListener('touchend',  onDropCD);
+    if (!wasDragged) return;
+    const touch = e.changedTouches ? e.changedTouches[0] : e;
+    const r = getStageRect();
+    if (touch.clientX > r.left && touch.clientX < r.right &&
+        touch.clientY > r.top  && touch.clientY < r.bottom) {
+      justInserted = true;
+      insertCD();
+    }
+  }
+
+  cd.addEventListener('click', () => {
+    if (!inserted && !wasDragged) {
+      insertCD(); // no justInserted needed — cd is outside stage, no stage click follows
+    }
+  });
+
+  // ── Stage click — pause/resume only ──────────────────────────
+  stage.addEventListener('click', (e) => {
+    if (isOpaqueAt(layerRewind, e.clientX, e.clientY)) return;
+    if (isOpaqueAt(layerSkip,   e.clientX, e.clientY)) return;
+    if (justInserted) { justInserted = false; return; }
+    if (!inserted) return;
+    if (!isOpaqueAt(layerBody, e.clientX, e.clientY)) return;
+    if (music.paused) {
+      music.play().catch(()=>{});
+    } else {
+      music.pause();
+    }
+  });
+
+  // ── Insert / Eject ────────────────────────────────────────────
+  function insertCD() {
+    inserted = true;
+    cd.classList.add('hidden');
+    showClosedBody();
+    clickIn.currentTime = 0;
+    clickIn.play().catch(()=>{});
+    setTimeout(() => {
+      if (!inserted) return;
+      layerLights.classList.remove('off'); layerScreen.classList.remove('off');
+      void layerLights.offsetWidth; void layerScreen.offsetWidth;
+      layerLights.classList.add('on');
+      layerScreen.classList.add('on');
+      layerCRT.classList.add('on');
+      setTimeout(() => {
+        if (!inserted) return;
+        if (!everPlayed) { loadSong(currentSong); everPlayed = true; }
+        layerAlbum.src = `./playlist/${currentSong}.png`;
+        layerAlbum.classList.add('on');
+        layerScreenBlack.classList.add('on');
+        music.play().then(() => setupBumpAnalyser()).catch(()=>{});
+      }, MUSIC_START_DELAY);
+    }, LIGHT_ON_DELAY);
+  }
+
+  function ejectState() {
+    inserted = false;
+    justInserted = false;
+    music.pause();
+    bumper.style.transform = '';
+    bumpVel = 0; bumpPos = 0;
+    layerLights.classList.remove('on'); layerLights.classList.add('off');
+    layerScreen.classList.remove('on'); layerScreen.classList.add('off');
+    layerCRT.classList.remove('on');
+    layerAlbum.classList.remove('on');
+    layerScreenBlack.classList.remove('on');
+    showClosedBody();
+    const r = getStageRect();
+    cd.style.left = r.left + 'px';
+    cd.style.top  = r.top  + 'px';
+    cd.style.width  = cdSize + 'px';
+    cd.style.height = cdSize + 'px';
+    cd.classList.remove('hidden');
+    clickOut.currentTime = 0;
+    clickOut.play().catch(()=>{});
+  }
+
+  // ── Stage dispatcher ──────────────────────────────────────────
+  stage.addEventListener('mousedown', onStageDown);
+  stage.addEventListener('touchstart', onStageDown, { passive: false });
+
+  function onStageDown(e) {
+    const touch = e.touches ? e.touches[0] : e;
+    const cx = touch.clientX, cy = touch.clientY;
+    if (isOpaqueAt(layerRewind, cx, cy)) {
+      e.preventDefault();
+      e.stopPropagation();
+      layerRewind.src = 'cd_player/rewind_pressed.png';
+      layerRewind.addEventListener('load', () => buildCache(layerRewind), { once: true });
+      btnPress.currentTime = 0; btnPress.play().catch(()=>{});
+      return;
+    }
+    if (isOpaqueAt(layerSkip, cx, cy)) {
+      e.preventDefault();
+      e.stopPropagation();
+      layerSkip.src = 'cd_player/skip_pressed.png';
+      layerSkip.addEventListener('load', () => buildCache(layerSkip), { once: true });
+      btnPress.currentTime = 0; btnPress.play().catch(()=>{});
+      return;
+    }
+  }
+
+  document.addEventListener('mouseup', onStageUp);
+  document.addEventListener('touchend', onStageUp);
+
+  function onStageUp() {
+    if (layerRewind.src.includes('rewind_pressed')) {
+      layerRewind.src = 'cd_player/rewind.png';
+      layerRewind.addEventListener('load', () => buildCache(layerRewind), { once: true });
+      btnLift.currentTime = 0; btnLift.play().catch(()=>{});
+      if (inserted) prevSong();
+      return;
+    }
+    if (layerSkip.src.includes('skip_pressed')) {
+      layerSkip.src = 'cd_player/skip.png';
+      layerSkip.addEventListener('load', () => buildCache(layerSkip), { once: true });
+      btnLift.currentTime = 0; btnLift.play().catch(()=>{});
+      if (inserted) nextSong();
+      return;
+    }
+  }
+
+  // ── Bump physics ──────────────────────────────────────────────
+  let audioCtx = null, analyser = null, bumpData = null;
+  let bumpPos = 0;
+  let bumpVel = 0;
+
+  function setupBumpAnalyser() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaElementSource(music);
+    analyser  = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.6;
+    bumpData  = new Uint8Array(analyser.frequencyBinCount);
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    bumpLoop();
+  }
+
+  function bumpLoop() {
+    requestAnimationFrame(bumpLoop);
+    let target = 0;
+    if (analyser && inserted && !music.paused) {
+      analyser.getByteFrequencyData(bumpData);
+      const loB = 2, hiB = 14;
+      let sum = 0;
+      for (let i = loB; i <= hiB; i++) sum += bumpData[i];
+      const energy = sum / ((hiB - loB + 1) * 255);
+      target = BUMP_KICK * energy;
+    }
+    const force = (target - bumpPos) * BUMP_SPRING;
+    bumpVel += force;
+    bumpVel *= BUMP_DAMPING;
+    bumpPos += bumpVel;
+    if (Math.abs(bumpPos) > 0.05 || Math.abs(bumpVel) > 0.05) {
+      bumper.style.transform = `translateY(${bumpPos.toFixed(2)}px)`;
+    } else {
+      bumpPos = 0; bumpVel = 0;
+      bumper.style.transform = '';
+    }
+  }
+</script>
+</body>
+</html>
