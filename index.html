@@ -150,8 +150,8 @@ const DRAG_THRESHOLD    = 6;     // px pointer must move before counted as a dra
 
 // -- Bump physics --
 const BUMP_KICK         = -30;   // px upward displacement at full bass energy (negative = up)
-const BUMP_SPRING       = 0.50;  // spring stiffness pulling back to rest
-const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = bouncier)
+const BUMP_SPRING       = 0.50;  // spring stiffness
+const BUMP_DAMPING      = 0.72;  // velocity damping per frame
 
 // ============================================================
 //  END OF SETTINGS
@@ -290,10 +290,17 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
     music.src = `./playlist/${n}.mp3`;
     if (inserted) layerAlbum.src = `./playlist/${n}.png`;
   }
-  function nextSong() { loadSong((currentSong % TOTAL_SONGS) + 1); music.play().catch(()=>{}); }
+  function resumeAndPlay() {
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().then(() => music.play().catch(()=>{}));
+    } else {
+      music.play().catch(()=>{});
+    }
+  }
+  function nextSong() { loadSong((currentSong % TOTAL_SONGS) + 1); resumeAndPlay(); }
   function prevSong() {
-    if (music.currentTime > 3) { music.currentTime = 0; }
-    else { loadSong(currentSong === 1 ? TOTAL_SONGS : currentSong - 1); music.play().catch(()=>{}); }
+    if (music.currentTime > 3) { music.currentTime = 0; music.play().catch(()=>{}); }
+    else { loadSong(currentSong === 1 ? TOTAL_SONGS : currentSong - 1); resumeAndPlay(); }
   }
 
   // ── Hit testing ───────────────────────────────────────────────
@@ -327,7 +334,7 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
   let inserted       = false;
   let everPlayed     = false;
   let wasDragged     = false;
-  let justInserted   = false;
+  let insertedAt = 0; // timestamp of last insert, to suppress immediate post-drop clicks
   let dragStartX, dragStartY;
   let grabOffX, grabOffY;
 
@@ -360,7 +367,7 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
     const cx = lastMouseX, cy = lastMouseY;
     if (isOpaqueAt(layerRewind, cx, cy) || isOpaqueAt(layerSkip, cx, cy)) {
       stage.style.cursor = CURSOR_POINTER;
-    } else if (inserted && isOpaqueAt(layerBody, cx, cy)) {
+    } else if (inserted && everPlayed && isOpaqueAt(layerBody, cx, cy)) {
       stage.style.cursor = music.paused ? CURSOR_PLAY : CURSOR_PAUSE;
     } else {
       stage.style.cursor = CURSOR_DEFAULT;
@@ -429,8 +436,8 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
     const r = getStageRect();
     if (touch.clientX > r.left && touch.clientX < r.right &&
         touch.clientY > r.top  && touch.clientY < r.bottom) {
-      justInserted = true;
       insertCD();
+      insertedAt = Date.now();
     }
   }
 
@@ -444,7 +451,7 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
   stage.addEventListener('click', (e) => {
     if (isOpaqueAt(layerRewind, e.clientX, e.clientY)) return;
     if (isOpaqueAt(layerSkip,   e.clientX, e.clientY)) return;
-    if (justInserted) { justInserted = false; return; }
+    if (Date.now() - insertedAt < 300) return;
     if (!inserted) return;
     if (!isOpaqueAt(layerBody, e.clientX, e.clientY)) return;
     if (music.paused) {
@@ -474,14 +481,21 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
         layerAlbum.src = `./playlist/${currentSong}.png`;
         layerAlbum.classList.add('on');
         layerScreenBlack.classList.add('on');
-        music.play().then(() => setupBumpAnalyser()).catch(()=>{});
+        const playMusic = () => {
+          if (audioCtx && audioCtx.state === 'suspended') {
+            audioCtx.resume().then(() => music.play().catch(()=>{}));
+          } else {
+            music.play().catch(()=>{});
+          }
+          setupBumpAnalyser();
+        };
+        playMusic();
       }, MUSIC_START_DELAY);
     }, LIGHT_ON_DELAY);
   }
 
   function ejectState() {
     inserted = false;
-    justInserted = false;
     music.pause();
     bumper.style.transform = '';
     bumpVel = 0; bumpPos = 0;
@@ -550,10 +564,24 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
   let audioCtx = null, analyser = null, bumpData = null;
   let bumpPos = 0;
   let bumpVel = 0;
+  let bumpLoopStarted = false;
 
-  function setupBumpAnalyser() {
-    if (audioCtx) return;
+  // Create AudioContext on first user gesture so mobile browsers allow it.
+  // iOS and Android require this to happen synchronously inside a touch/click handler.
+  function initAudioContext() {
+    if (audioCtx) {
+      // Resume if suspended (iOS suspends on page hide etc.)
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return;
+    }
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  // Wire the analyser to the music element once — can only be done once per element.
+  let analyserWired = false;
+  function wireAnalyser() {
+    if (analyserWired || !audioCtx) return;
+    analyserWired = true;
     const src = audioCtx.createMediaElementSource(music);
     analyser  = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
@@ -561,11 +589,32 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
     bumpData  = new Uint8Array(analyser.frequencyBinCount);
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
-    bumpLoop();
+  }
+
+  // Init AudioContext on any first interaction so it's ready before music starts
+  function onFirstGesture() {
+    initAudioContext();
+    document.removeEventListener('touchstart', onFirstGesture);
+    document.removeEventListener('mousedown',  onFirstGesture);
+  }
+  document.addEventListener('touchstart', onFirstGesture, { passive: true });
+  document.addEventListener('mousedown',  onFirstGesture);
+
+  function setupBumpAnalyser() {
+    initAudioContext();
+    wireAnalyser();
+    if (!bumpLoopStarted) {
+      bumpLoopStarted = true;
+      bumpLoop();
+    }
   }
 
   function bumpLoop() {
     requestAnimationFrame(bumpLoop);
+
+    // Keep AudioContext running — iOS suspends it silently
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
     let target = 0;
     if (analyser && inserted && !music.paused) {
       analyser.getByteFrequencyData(bumpData);
@@ -586,6 +635,10 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame (0–1, lower = b
       bumper.style.transform = '';
     }
   }
+
+  // Start the loop immediately so spring settles even before audio is set up
+  bumpLoopStarted = true;
+  bumpLoop();
 </script>
 </body>
 </html>
