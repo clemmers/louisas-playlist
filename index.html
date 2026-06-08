@@ -296,6 +296,7 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
     if (inserted) layerAlbum.src = `./playlist/${n}.png`;
   }
   function resumeAndPlay() {
+    music.volume = 1;
     if (audioCtx && audioCtx.state === 'suspended') {
       audioCtx.resume().then(() => music.play().catch(()=>{}));
     } else {
@@ -460,6 +461,7 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
     if (!inserted) return;
     if (!isOpaqueAt(layerBody, e.clientX, e.clientY)) return;
     if (music.paused) {
+      music.volume = 1;
       music.play().catch(()=>{});
     } else {
       music.pause();
@@ -477,9 +479,11 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
     clickIn.currentTime = 0;
     clickIn.play().catch(()=>{});
 
-    // Load and play music immediately — still inside the gesture, so mobile allows it
-    if (!everPlayed) { loadSong(currentSong); everPlayed = true; }
+    // Load and start music immediately during gesture (required for mobile).
+    if (!everPlayed) { everPlayed = true; loadSong(currentSong); }
     musicStarted = true;
+    // Start silent — volume fades in after lights animation
+    music.volume = 0;
     if (audioCtx && audioCtx.state === 'suspended') {
       audioCtx.resume().then(() => music.play().catch(()=>{}));
     } else {
@@ -487,7 +491,7 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
     }
     setupBumpAnalyser();
 
-    // Lights/screen animation runs independently — purely cosmetic
+    // Lights/screen animation — purely cosmetic
     setTimeout(() => {
       if (!inserted) return;
       layerLights.classList.remove('off'); layerScreen.classList.remove('off');
@@ -495,9 +499,25 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
       layerLights.classList.add('on');
       layerScreen.classList.add('on');
       layerCRT.classList.add('on');
-      layerAlbum.src = `./playlist/${currentSong}.png`;
-      layerAlbum.classList.add('on');
-      layerScreenBlack.classList.add('on');
+
+      // Wait for screen monitor-on animation (1.4s) before showing album
+      setTimeout(() => {
+        if (!inserted) return;
+        layerAlbum.src = `./playlist/${currentSong}.png`;
+        layerAlbum.classList.add('on');
+        layerScreenBlack.classList.add('on');
+
+        // Fade volume in now that album is showing
+        music.currentTime = 0;
+        const fadeSteps = 20;
+        const fadeInterval = 300 / fadeSteps;
+        let step = 0;
+        const fade = setInterval(() => {
+          step++;
+          music.volume = Math.min(step / fadeSteps, 1);
+          if (step >= fadeSteps) clearInterval(fade);
+        }, fadeInterval);
+      }, 1400);
     }, LIGHT_ON_DELAY);
   }
 
