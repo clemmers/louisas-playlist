@@ -637,7 +637,7 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
     }
 
     // Scale physics to actual elapsed time (normalised to 60fps baseline)
-    const scale = dt * 90;
+    const scale = dt * 60;
     const force = (target - bumpPos) * BUMP_SPRING * scale;
     bumpVel += force;
     bumpVel *= Math.pow(BUMP_DAMPING, scale); // exponential damping scales correctly with dt
