@@ -149,9 +149,13 @@ const TOTAL_SONGS       = 26;
 const DRAG_THRESHOLD    = 6;     // px pointer must move before counted as a drag
 
 // -- Bump physics --
-const BUMP_KICK         = -30;   // px upward displacement at full bass energy (negative = up)
-const BUMP_SPRING       = 0.50;  // spring stiffness
-const BUMP_DAMPING      = 0.72;  // velocity damping per frame
+// BUMP_KICK is calibrated for MacBook Air fullscreen (stageSize ≈ 533px).
+// Scales proportionally with actual stage size at runtime.
+const BUMP_KICK_REF_SIZE = 533;   // reference stage size (MBA fullscreen)
+const BUMP_KICK          = -30;   // px displacement at reference size (negative = up)
+const BUMP_KICK_RATIO    = BUMP_KICK / BUMP_KICK_REF_SIZE; // scaled at runtime
+const BUMP_SPRING        = 0.50;  // spring stiffness pulling back to rest
+const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = bouncier)
 
 // ============================================================
 //  END OF SETTINGS
@@ -609,8 +613,12 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame
     }
   }
 
-  function bumpLoop() {
+  function bumpLoop(timestamp) {
     requestAnimationFrame(bumpLoop);
+
+    // Delta time in seconds, capped to avoid huge jumps after tab switch etc.
+    const dt = Math.min((timestamp - (bumpLoop.lastTime || timestamp)) / 1000, 0.05);
+    bumpLoop.lastTime = timestamp;
 
     // Keep AudioContext running — iOS suspends it silently
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
@@ -622,12 +630,17 @@ const BUMP_DAMPING      = 0.72;  // velocity damping per frame
       let sum = 0;
       for (let i = loB; i <= hiB; i++) sum += bumpData[i];
       const energy = sum / ((hiB - loB + 1) * 255);
-      target = BUMP_KICK * energy;
+      const effectiveKick = BUMP_KICK_RATIO * stageSize; // scales with screen size
+      target = effectiveKick * energy;
     }
-    const force = (target - bumpPos) * BUMP_SPRING;
+
+    // Scale physics to actual elapsed time (normalised to 60fps baseline)
+    const scale = dt * 90;
+    const force = (target - bumpPos) * BUMP_SPRING * scale;
     bumpVel += force;
-    bumpVel *= BUMP_DAMPING;
-    bumpPos += bumpVel;
+    bumpVel *= Math.pow(BUMP_DAMPING, scale); // exponential damping scales correctly with dt
+    bumpPos += bumpVel * scale;
+
     if (Math.abs(bumpPos) > 0.05 || Math.abs(bumpVel) > 0.05) {
       bumper.style.transform = `translateY(${bumpPos.toFixed(2)}px)`;
     } else {
