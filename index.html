@@ -286,6 +286,7 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
   const btnLift  = new Audio('cd_player/button_lift.mp3');
 
   let currentSong = 1;
+  let musicStarted = false;
   const music = new Audio();
   music.addEventListener('ended', nextSong);
 
@@ -471,10 +472,11 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
     initAudioContext();  // synchronous during gesture — mobile will allow this
     wireAnalyser();      // wire now while gesture is active
 
-    // Unlock the audio element synchronously during the gesture.
-    // iOS/Android require play() to be called within the gesture handler.
-    // We immediately pause so the actual playback still starts after the delay.
-    music.play().then(() => music.pause()).catch(() => {});
+    // Unlock the audio element synchronously during the gesture (required by iOS/Android).
+    // We load a silent moment then pause — just to get permission, not to actually play yet.
+    music.load();
+    const unlockPlay = music.play();
+    if (unlockPlay) unlockPlay.then(() => { if (!musicStarted) music.pause(); }).catch(() => {});
 
     cd.classList.add('hidden');
     showClosedBody();
@@ -493,6 +495,7 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
         layerAlbum.src = `./playlist/${currentSong}.png`;
         layerAlbum.classList.add('on');
         layerScreenBlack.classList.add('on');
+        musicStarted = true;
         const playMusic = () => {
           if (audioCtx && audioCtx.state === 'suspended') {
             audioCtx.resume().then(() => music.play().catch(()=>{}));
