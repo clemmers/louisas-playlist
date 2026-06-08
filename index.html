@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CD Player</title>
+<title>Louisa's Playlist</title>
+<link rel="icon" href="favicon.png">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -143,8 +144,7 @@
 
 const STAGE_PADDING     = 80;    // px kept free around player (for CD above + breathing room)
 const CD_GAP            = 20;    // px gap between CD and top of player
-const LIGHT_ON_DELAY    = 600;   // ms after insert before lights turn on
-const MUSIC_START_DELAY = 1800;  // ms after lights on before music begins
+const LIGHT_ON_DELAY    = 600;   // ms after insert before lights/screen turn on
 const TOTAL_SONGS       = 26;
 const DRAG_THRESHOLD    = 6;     // px pointer must move before counted as a drag
 
@@ -469,19 +469,25 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
   // ── Insert / Eject ────────────────────────────────────────────
   function insertCD() {
     inserted = true;
-    initAudioContext();  // synchronous during gesture — mobile will allow this
-    wireAnalyser();      // wire now while gesture is active
-
-    // Unlock the audio element synchronously during the gesture (required by iOS/Android).
-    // We load a silent moment then pause — just to get permission, not to actually play yet.
-    music.load();
-    const unlockPlay = music.play();
-    if (unlockPlay) unlockPlay.then(() => { if (!musicStarted) music.pause(); }).catch(() => {});
+    initAudioContext();
+    wireAnalyser();
 
     cd.classList.add('hidden');
     showClosedBody();
     clickIn.currentTime = 0;
     clickIn.play().catch(()=>{});
+
+    // Load and play music immediately — still inside the gesture, so mobile allows it
+    if (!everPlayed) { loadSong(currentSong); everPlayed = true; }
+    musicStarted = true;
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().then(() => music.play().catch(()=>{}));
+    } else {
+      music.play().catch(()=>{});
+    }
+    setupBumpAnalyser();
+
+    // Lights/screen animation runs independently — purely cosmetic
     setTimeout(() => {
       if (!inserted) return;
       layerLights.classList.remove('off'); layerScreen.classList.remove('off');
@@ -489,23 +495,9 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
       layerLights.classList.add('on');
       layerScreen.classList.add('on');
       layerCRT.classList.add('on');
-      setTimeout(() => {
-        if (!inserted) return;
-        if (!everPlayed) { loadSong(currentSong); everPlayed = true; }
-        layerAlbum.src = `./playlist/${currentSong}.png`;
-        layerAlbum.classList.add('on');
-        layerScreenBlack.classList.add('on');
-        musicStarted = true;
-        const playMusic = () => {
-          if (audioCtx && audioCtx.state === 'suspended') {
-            audioCtx.resume().then(() => music.play().catch(()=>{}));
-          } else {
-            music.play().catch(()=>{});
-          }
-          setupBumpAnalyser();
-        };
-        playMusic();
-      }, MUSIC_START_DELAY);
+      layerAlbum.src = `./playlist/${currentSong}.png`;
+      layerAlbum.classList.add('on');
+      layerScreenBlack.classList.add('on');
     }, LIGHT_ON_DELAY);
   }
 
