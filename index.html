@@ -161,7 +161,22 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
 //  END OF SETTINGS
 // ============================================================
 
-  // ── Dither background ────────────────────────────────────────
+  // ── Wake Lock — prevent screen from sleeping ─────────────────
+  let wakeLock = null;
+
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return; // not supported
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+    } catch (e) {}
+  }
+
+  // Re-acquire wake lock if it gets released (e.g. tab backgrounded then foregrounded)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') requestWakeLock();
+  });
+
+  requestWakeLock();
   const BAYER8 = [
      0,32, 8,40, 2,34,10,42,
     48,16,56,24,50,18,58,26,
