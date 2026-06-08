@@ -280,8 +280,8 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
   resizeLayout();
 
   // ── Audio ─────────────────────────────────────────────────────
-  const clickIn  = new Audio('click.mp3');
-  const clickOut = new Audio('click_out.mp3');
+  const clickIn  = new Audio('cd_player/click.mp3');
+  const clickOut = new Audio('cd_player/click_out.mp3');
   const btnPress = new Audio('cd_player/button_press.mp3');
   const btnLift  = new Audio('cd_player/button_lift.mp3');
 
@@ -468,6 +468,8 @@ const BUMP_DAMPING       = 0.72;  // velocity damping per frame (0–1, lower = 
   // ── Insert / Eject ────────────────────────────────────────────
   function insertCD() {
     inserted = true;
+    initAudioContext();  // synchronous during gesture — mobile will allow this
+    wireAnalyser();      // wire now while gesture is active
     cd.classList.add('hidden');
     showClosedBody();
     clickIn.currentTime = 0;
